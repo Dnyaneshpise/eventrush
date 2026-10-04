@@ -1,0 +1,141 @@
+# One command spins up the ENTIRE distributed system, frontend included:
+#   docker compose up --build
+#   (run this from the eventrush-platform/ root, where this file lives)
+#
+# What starts:
+#   mysql   - 1 database (shared by both app copies - this is the
+#             single source of truth that makes the pessimistic lock
+#             actually work across instances)
+#   redis   - 1 shared cache (this is what makes the rate limiter and
+#             fair queue actually shared across instances too)
+#   app1    - Spring Boot, copy #1 (stateless)
+#   app2    - Spring Boot, copy #2 (identical code, separate process,
+#             stateless)
+#   nginx   - the ONLY entry point into the whole app. Serves the React
+#             static build directly (route: /*) AND load-balances API
+#             traffic across app1/app2 (route: /api/*). One container,
+#             one hop - see nginx/Dockerfile and nginx/nginx.conf.
+#
+# Notice: app1 and app2 don't expose ports to your machine directly -
+# only nginx does. That's deliberate: it forces every request through
+# the load balancer, same as production, and matches the architecture
+# diagram (browser -> nginx -> either static files or app1/app2).
+#
+# STARTUP ORDERING: mysql -> app1/app2 (wait for real health, not just
+# "container started") -> nginx (wait for apps to actually respond).
+# Each healthcheck calls a real endpoint rather than just checking the
+# process is running, so nginx won't try routing to an app that's
+# still mid-Hibernate-bootstrap ("no live upstreams" 502s you'd
+# otherwise see for the first several seconds of every startup).
+
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: Kanha
+      MYSQL_DATABASE: eventrush
+    ports:
+      # Host-side port only - for connecting an external tool like
+      # MySQL Workbench directly to this container. Changed from the
+      # default 3306 because that's commonly already taken by a local
+      # MySQL install (very common on Windows). This does NOT affect
+      # how app1/app2 reach this database - they use the internal
+      # Docker network address "mysql:3306" regardless of this mapping.
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-pyourpassword"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      # MySQL's official image does a two-step startup on first run:
+      # initializes the data directory, RESTARTS ITSELF, then becomes
+      # truly ready. Without start_period, the healthcheck can catch
+      # the brief "up" moment during that restart and falsely report
+      # healthy right before MySQL goes down again for the restart -
+      # which is exactly what causes app1/app2 to start too early and
+      # immediately fail with "Unable to determine Dialect without
+      # JDBC metadata" (Hibernate couldn't get a connection at all).
+      start_period: 90s
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  app1:
+    build: ./backend
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/eventrush?createDatabaseIfNotExist=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: yourpassword
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/events"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 90s
+    # Belt-and-suspenders alongside mysql's start_period above: if this
+    # container still loses the race and exits, Docker restarts it
+    # automatically instead of leaving it dead. By the time it retries,
+    # MySQL is virtually always genuinely ready.
+    restart: on-failure:5
+
+  app2:
+    build: ./backend
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/eventrush?createDatabaseIfNotExist=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: yourpassword
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/events"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 90s
+    restart: on-failure:5
+
+  nginx:
+    build:
+      # Context is the repo root (not ./nginx) because the Dockerfile
+      # needs to COPY the frontend/ source tree to build it - Docker
+      # can't COPY files from outside the build context.
+      context: .
+      dockerfile: nginx/Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      app1:
+        condition: service_healthy
+      app2:
+        condition: service_healthy
+    healthcheck:
+      # Use 127.0.0.1, not "localhost": Alpine's /etc/hosts resolves
+      # "localhost" to both 127.0.0.1 and ::1, and BusyBox wget (the only
+      # wget available on nginx:alpine - it's just an applet baked into
+      # the busybox multi-call binary, not full GNU wget) takes whichever
+      # address comes back first and does NOT fall back if that one fails,
+      # unlike curl's Happy Eyeballs behavior used in app1/app2's
+      # healthcheck above. nginx.conf only has "listen 80;" (IPv4), so if
+      # wget resolves to ::1 first, every single check hits connection-
+      # refused and nginx gets marked unhealthy forever, even though it's
+      # actually running fine. Being explicit about the address sidesteps
+      # the resolution order entirely.
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/api/events"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  mysql_data:

@@ -1,0 +1,9 @@
+# Applies to the nginx service's build, whose context is the repo root
+# (needed so its Dockerfile can COPY frontend/ - see nginx/Dockerfile).
+# Without this, every build would ship the whole repo - including
+# backend/target, node_modules, and .git - to the Docker daemon.
+node_modules
+dist
+target
+.git
+*.log
