@@ -1,0 +1,76 @@
+# Dependencies
+node_modules/
+npm/
+yarn/
+pnpm/
+bower/
+jspm/
+
+# Build outputs
+dist/
+build/
+out/
+.next/
+*.swp
+*.swo
+
+# Environment files
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Coverage
+coverage/
+*.lcov
+
+# Test results
+test-results/
+junit.xml
+
+# Cache
+.cache/
+.next/cache/
+
+# Public generated files
+public/generated/
+public/static/js/*.js.map
+
+# Skip files
+*.skip
+*.skip.json
+
+# Specific to EventRush
+*.env*.local
+!.env.example
+coverage/
+.coverage/
+
+# Git
+# .gitignore
+

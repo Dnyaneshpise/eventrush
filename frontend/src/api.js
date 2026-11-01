@@ -40,40 +40,74 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS)
 // below is what makes the check-then-write atomic in JS, the same
 // job the DB's SELECT...FOR UPDATE does in the real backend.
 
-const ROWS = ['A', 'B', 'C']
-const SEATS_PER_ROW = 10
-const PRE_BOOKED = new Set(['A3', 'A4', 'B1', 'B7', 'B8', 'C2', 'C9', 'C10'])
+// Several events so the discovery grid is populated even with no backend
+// running. Each carries its own seat layout, exactly like the real API
+// (where seats belong to one event). Seat ids stay unique across events
+// via one running counter while building.
+const MOCK_EVENTS = [
+  { id: 1, name: 'Coldplay — Music of the Spheres World Tour', venueName: 'Jio Garden, Bengaluru', category: 'Music', daysAhead: 6, hour: 20, rows: ['A', 'B', 'C'], perRow: 10, preBooked: ['A3', 'A4', 'B1', 'B7', 'B8', 'C2', 'C9', 'C10'] },
+  { id: 2, name: 'Arijit Singh Live in Concert', venueName: 'DY Patil Stadium, Mumbai', category: 'Music', daysAhead: 12, hour: 19, rows: ['A', 'B', 'C', 'D'], perRow: 12 },
+  { id: 3, name: 'The Comedy Show — Stand-up Night', venueName: 'Kalinga Auditorium, Bengaluru', category: 'Comedy', daysAhead: 3, hour: 21, rows: ['A', 'B'], perRow: 8 },
+  { id: 4, name: 'IPL 2026 · RCB vs CSK', venueName: 'M. Chinnaswamy Stadium, Bengaluru', category: 'Sports', daysAhead: 9, hour: 19, rows: ['A', 'B', 'C', 'D', 'E'], perRow: 10 },
+  { id: 5, name: 'Sunburn Arena — EDM Night', venueName: 'Palace Grounds, Bengaluru', category: 'Music', daysAhead: 20, hour: 18, rows: ['A', 'B', 'C'], perRow: 12 },
+  { id: 6, name: 'Diljit Dosanjh — Dil-Luminati Tour', venueName: 'Gachibowli Arena, Hyderabad', category: 'Music', daysAhead: 15, hour: 20, rows: ['A', 'B', 'C', 'D'], perRow: 10 },
+]
 
-function buildMockSeats() {
+function mockBookingOpensAt(ev) {
+  const d = new Date(Date.now() + ev.daysAhead * 24 * 60 * 60 * 1000)
+  d.setHours(ev.hour, 0, 0, 0)
+  return d.toISOString()
+}
+
+// Books roughly a quarter of seats deterministically, so a fresh demo
+// venue reads like a partially-sold show rather than a pristine grid.
+function isPreBooked(seatNumber, rowIndex) {
+  const num = parseInt(seatNumber.replace(/^\D+/, ''), 10)
+  return (num + rowIndex * 3) % 4 === 0
+}
+
+let mockSeatId = 1
+
+function buildSeatsForEvent(ev) {
   const seats = []
-  let id = 1
-  for (const row of ROWS) {
-    for (let i = 1; i <= SEATS_PER_ROW; i++) {
+  ev.rows.forEach((row, rowIndex) => {
+    for (let i = 1; i <= ev.perRow; i++) {
       const seatNumber = `${row}${i}`
-      seats.push({ id: id++, seatNumber, status: PRE_BOOKED.has(seatNumber) ? 'BOOKED' : 'AVAILABLE' })
+      const preBooked = ev.preBooked ? ev.preBooked.includes(seatNumber) : isPreBooked(seatNumber, rowIndex)
+      seats.push({ id: mockSeatId++, seatNumber, status: preBooked ? 'BOOKED' : 'AVAILABLE' })
     }
-  }
+  })
   return seats
 }
 
 const mockState = {
-  event: {
-    id: 1,
-    name: 'Coldplay Concert - Bengaluru',
-    totalSeats: ROWS.length * SEATS_PER_ROW,
-    bookingOpensAt: new Date().toISOString(),
-  },
-  seats: buildMockSeats(),
+  events: [],
+  seatsByEvent: {},
   bookings: new Map(), // idempotencyKey -> booking response
   rateLimits: new Map(), // userId -> { tokens, lastRefill }
   seatMutex: Promise.resolve(), // serializes booking attempts, like the DB row lock
 }
 
 function resetMockState() {
-  mockState.seats = buildMockSeats()
+  mockSeatId = 1
+  mockState.events = MOCK_EVENTS.map((ev) => ({
+    id: ev.id,
+    name: ev.name,
+    totalSeats: ev.rows.length * ev.perRow,
+    bookingOpensAt: mockBookingOpensAt(ev),
+    venueId: ev.id,
+    venueName: ev.venueName,
+    category: ev.category,
+  }))
+  mockState.seatsByEvent = {}
+  for (const ev of MOCK_EVENTS) {
+    mockState.seatsByEvent[ev.id] = buildSeatsForEvent(ev)
+  }
   mockState.bookings.clear()
   mockState.rateLimits.clear()
 }
+
+resetMockState()
 
 function mockRateLimitCheck(userId) {
   const MAX = 5
@@ -116,7 +150,7 @@ function mockBookSeat({ userId, seatId, eventId, idempotencyKey }) {
       throw err
     }
 
-    const seat = mockState.seats.find((s) => s.id === seatId)
+    const seat = (mockState.seatsByEvent[eventId] || []).find((s) => s.id === seatId)
     if (!seat) {
       const err = new Error(`Seat not found: ${seatId}`)
       err.httpStatus = 404
@@ -165,7 +199,14 @@ export async function getEvent(eventId) {
     const picked = eventId ? events.find((e) => e.id === eventId) : events[events.length - 1]
     return { data: picked || events[events.length - 1], all: events, mode: 'live' }
   } catch {
-    return { data: mockState.event, all: [mockState.event], mode: 'mock' }
+    const picked = eventId
+      ? mockState.events.find((e) => e.id === eventId)
+      : mockState.events[mockState.events.length - 1]
+    return {
+      data: picked || mockState.events[mockState.events.length - 1],
+      all: mockState.events,
+      mode: 'mock',
+    }
   }
 }
 
@@ -176,7 +217,8 @@ export async function getSeats(eventId) {
     const seats = await res.json()
     return { data: seats, mode: 'live' }
   } catch {
-    return { data: mockState.seats, mode: 'mock' }
+    const fallbackEventId = mockState.events[0]?.id
+    return { data: mockState.seatsByEvent[eventId] || mockState.seatsByEvent[fallbackEventId] || [], mode: 'mock' }
   }
 }
 

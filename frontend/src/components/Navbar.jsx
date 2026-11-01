@@ -1,10 +1,27 @@
-export default function Navbar({ mode, view, onViewChange, onCreateEvent, events = [], selectedEventId, onSwitchEvent }) {
+const NAV_LINKS = [
+  { key: 'home', label: 'Discover' },
+  { key: 'bookings', label: 'My Bookings' },
+  { key: 'help', label: 'Help' },
+]
+
+export default function Navbar({
+  mode,
+  view,
+  onViewChange,
+  onCreateEvent,
+  events = [],
+  selectedEventId,
+  onSwitchEvent,
+  route,
+  onNavigate,
+}) {
+  const active = route?.name
   return (
     <div className="navbar">
       <div className="navbar-inner">
-        <div className="brand-logo">
+        <button className="brand-logo brand-logo--btn" onClick={() => onNavigate('')}>
           Event<span>Rush</span>
-        </div>
+        </button>
 
         <div className="nav-links">
           {events.length > 1 && (
@@ -18,8 +35,15 @@ export default function Navbar({ mode, view, onViewChange, onCreateEvent, events
               ))}
             </select>
           )}
-          <span className="nav-link">My Bookings</span>
-          <span className="nav-link">Help</span>
+          {NAV_LINKS.map((link) => (
+            <button
+              key={link.key}
+              className={`nav-link nav-link--btn ${active === link.key ? 'active' : ''}`}
+              onClick={() => onNavigate(link.key === 'home' ? '' : link.key)}
+            >
+              {link.label}
+            </button>
+          ))}
         </div>
 
         <div className="nav-right">
@@ -53,3 +77,4 @@ export default function Navbar({ mode, view, onViewChange, onCreateEvent, events
     </div>
   )
 }
+

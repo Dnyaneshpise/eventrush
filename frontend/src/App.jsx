@@ -9,16 +9,33 @@ import DevBookingPanel from './components/DevBookingPanel.jsx'
 import DevStressTest from './components/DevStressTest.jsx'
 import ConsoleLog from './components/ConsoleLog.jsx'
 import CreateEventFlow from './components/CreateEventFlow.jsx'
+import DiscoveryHome from './components/DiscoveryHome.jsx'
+import MyBookings from './components/MyBookings.jsx'
+import HelpPage from './components/HelpPage.jsx'
+import Footer from './components/Footer.jsx'
+import { eventMeta } from './eventMeta.js'
 import { getEvent, getSeats, bookSeat, resetDemoData, genIdempotencyKey } from './api.js'
 
 function timeNow() {
   return new Date().toLocaleTimeString('en-US', { hour12: false })
 }
 
+// Tiny hash router: no dependency, but real URLs so browser back /
+// forward and deep links (e.g. #/event/3) work like a production app.
+function parseHash() {
+  const raw = window.location.hash.replace(/^#\/?/, '')
+  const [seg, id] = raw.split('/')
+  if (seg === 'event' && id) return { name: 'event', eventId: Number(id) }
+  if (seg === 'bookings') return { name: 'bookings' }
+  if (seg === 'help') return { name: 'help' }
+  if (seg === 'developer') return { name: 'developer' }
+  return { name: 'home' }
+}
+
 let toastIdSeq = 0
 
 export default function App() {
-  const [view, setView] = useState('audience')
+  const [route, setRoute] = useState(parseHash)
   const [mode, setMode] = useState('mock')
   const [event, setEvent] = useState(null)
   const [allEvents, setAllEvents] = useState([])
@@ -32,10 +49,28 @@ export default function App() {
   const [rushSummary, setRushSummary] = useState(null)
   const [toasts, setToasts] = useState([])
   const [showCreateEvent, setShowCreateEvent] = useState(false)
+  const [myBookings, setMyBookings] = useState([])
 
   const logIdRef = useRef(0)
   const consoleEndRef = useRef(null)
   const isBookingRef = useRef(false)
+  const firstLoadRef = useRef(true)
+
+  const isDeveloper = route.name === 'developer'
+  const view = isDeveloper ? 'developer' : 'audience'
+
+  // ---- routing (hash based) ----
+  useEffect(() => {
+    const onHash = () => setRoute(parseHash())
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
+
+  const navigate = useCallback((path) => {
+    const next = path ? `#/${path}` : '#/'
+    if (window.location.hash === next) setRoute(parseHash())
+    else window.location.hash = next
+  }, [])
 
   useEffect(() => {
     isBookingRef.current = isBooking
@@ -74,10 +109,20 @@ export default function App() {
     pushLog('info', `Loaded event "${eventRes.data.name}" — mode: ${eventRes.mode.toUpperCase()}`)
   }, [pushLog])
 
+  // Initial load, and re-load whenever the route points at a different
+  // event (e.g. clicking a card on the discovery grid).
   useEffect(() => {
-    loadData()
+    if (firstLoadRef.current) {
+      firstLoadRef.current = false
+      loadData(route.eventId)
+      return
+    }
+    if ((route.name === 'event' || route.name === 'developer') && route.eventId) {
+      setSelectedSeatId(null)
+      if (route.eventId !== event?.id) loadData(route.eventId)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [route])
 
   // Poll for seat status changes every few seconds while on the
   // booking screen. This is what makes "two people looking at the
@@ -87,7 +132,8 @@ export default function App() {
   // production app would use websockets/SSE for instant updates;
   // polling is the simple version of the same idea.
   useEffect(() => {
-    if (view !== 'audience' || !event) return
+    if (!event) return
+    if (route.name !== 'event' && route.name !== 'developer') return
 
     const interval = setInterval(async () => {
       const seatsRes = await getSeats(event.id)
@@ -113,10 +159,11 @@ export default function App() {
     }, 4000)
 
     return () => clearInterval(interval)
-  }, [view, event, selectedSeatId, pushToast])
+  }, [route, event, selectedSeatId, pushToast])
 
   const selectedSeat = seats.find((s) => s.id === selectedSeatId) || null
   const availableCount = seats.filter((s) => s.status === 'AVAILABLE').length
+  const priceFrom = event ? eventMeta(event).priceFrom : 2499
 
   async function attemptBooking({ seatId, forcedUserId, idempotencyKey, silent } = {}) {
     const uid = forcedUserId ?? userId
@@ -151,9 +198,24 @@ export default function App() {
   async function handleBook() {
     if (!selectedSeatId) return
     setIsBooking(true)
+    const seat = selectedSeat
     const outcome = await attemptBooking({})
     if (outcome.ok) {
-      pushToast('success', `You're going! Seat ${selectedSeat?.seatNumber} is confirmed.`)
+      const r = outcome.result
+      setMyBookings((prev) => [
+        {
+          idempotencyKey: r.idempotencyKey,
+          bookingId: r.bookingId,
+          seatNumber: r.seatNumber || seat?.seatNumber || String(selectedSeatId),
+          eventId: event?.id,
+          eventName: event?.name,
+          userId,
+          status: r.status || 'CONFIRMED',
+          createdAt: r.createdAt || new Date().toISOString(),
+        },
+        ...prev.filter((b) => b.idempotencyKey !== r.idempotencyKey),
+      ])
+      pushToast('success', `You're going! Seat ${seat?.seatNumber} is confirmed.`)
       setSelectedSeatId(null)
     } else {
       const status = outcome.error?.httpStatus
@@ -223,7 +285,7 @@ export default function App() {
     setSelectedSeatId(null)
     setRushSummary(null)
     setLastRequest(null)
-    loadData()
+    loadData(event?.id)
     pushLog('info', 'Demo data reset.')
   }
 
@@ -231,7 +293,12 @@ export default function App() {
     setSelectedSeatId(null)
     setLastRequest(null)
     setRushSummary(null)
-    loadData(eventId)
+    if (isDeveloper) loadData(eventId)
+    else navigate(`event/${eventId}`)
+  }
+
+  function handleViewChange(v) {
+    navigate(v === 'developer' ? 'developer' : '')
   }
 
   return (
@@ -239,7 +306,9 @@ export default function App() {
       <Navbar
         mode={mode}
         view={view}
-        onViewChange={setView}
+        route={route}
+        onNavigate={navigate}
+        onViewChange={handleViewChange}
         onCreateEvent={() => setShowCreateEvent(true)}
         events={allEvents}
         selectedEventId={event?.id}
@@ -254,25 +323,12 @@ export default function App() {
           onCreated={(newEvent) => {
             setShowCreateEvent(false)
             loadData(newEvent.id)
+            navigate(`event/${newEvent.id}`)
           }}
         />
       )}
 
-      {view === 'audience' ? (
-        <>
-          <EventHero event={event} availableCount={availableCount} totalSeats={event?.totalSeats || seats.length} />
-          <div className="container">
-            <div className="section">
-              <h2 className="section-title">Select your seat</h2>
-              <p className="section-subtitle">Tap an available seat below to select it.</p>
-              <div className="card">
-                <AuditoriumSeatMap seats={seats} selectedSeatId={selectedSeatId} onSelect={setSelectedSeatId} />
-              </div>
-            </div>
-          </div>
-          <BookingBar selectedSeat={selectedSeat} onBook={handleBook} isBooking={isBooking} />
-        </>
-      ) : (
+      {isDeveloper ? (
         <div className="dev-shell">
           <div className="container">
             <div className="dev-grid">
@@ -311,7 +367,32 @@ export default function App() {
             </div>
           </div>
         </div>
+      ) : route.name === 'home' ? (
+        <DiscoveryHome events={allEvents} onOpen={(id) => navigate(`event/${id}`)} />
+      ) : route.name === 'bookings' ? (
+        <MyBookings bookings={myBookings} onBrowse={() => navigate('')} />
+      ) : route.name === 'help' ? (
+        <HelpPage />
+      ) : (
+        <div className="event-page">
+          <EventHero event={event} availableCount={availableCount} totalSeats={event?.totalSeats || seats.length} />
+          <div className="container">
+            <button className="back-link" onClick={() => navigate('')}>
+              ← All events
+            </button>
+            <div className="section">
+              <h2 className="section-title">Select your seat</h2>
+              <p className="section-subtitle">Tap an available seat below to select it.</p>
+              <div className="card">
+                <AuditoriumSeatMap seats={seats} selectedSeatId={selectedSeatId} onSelect={setSelectedSeatId} />
+              </div>
+            </div>
+          </div>
+          <BookingBar selectedSeat={selectedSeat} onBook={handleBook} isBooking={isBooking} price={priceFrom} />
+        </div>
       )}
+
+      {!isDeveloper && <Footer onNavigate={navigate} />}
     </div>
   )
 }
